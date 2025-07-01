@@ -15,12 +15,23 @@ pub enum Error {
     BinDecode(#[from] bincode::error::DecodeError),
 }
 
+pub(super) fn apply_patch(base: &[u8], delta: &[u8]) -> Result<Vec<u8>> {
+    let (patch, _): (Patch, _) = bincode::decode_from_slice(delta, config::standard())?;
+    let res = files_diff::apply(base, &patch.into());
+    res.map_err(Error::Diff)
+}
+
+pub(super) fn apply_patch_vnext(base: &[u8], delta: Patch) -> Result<Vec<u8>> {
+    let res = files_diff::apply(base, &delta.into());
+    res.map_err(Error::Diff)
+}
+
 pub(super) fn create_patch(before: &[u8], after: &[u8]) -> Result<Vec<u8>> {
     let res = files_diff::diff(
         before,
         after,
-        files_diff::DiffAlgorithm::Bidiff1,
-        files_diff::CompressAlgorithm::Zstd,
+        DiffAlgorithm::Bidiff1,
+        CompressAlgorithm::Zstd,
     );
     let diff = res.map_err(Error::Diff)?;
     let patch = Patch::from(diff);
@@ -28,31 +39,30 @@ pub(super) fn create_patch(before: &[u8], after: &[u8]) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
-pub(super) fn apply_patch(base: &[u8], delta: &[u8]) -> Result<Vec<u8>> {
-    let (patch, _): (Patch, _) = bincode::decode_from_slice(delta, config::standard())?;
-    let res = files_diff::apply(base, &patch.into());
-    res.map_err(Error::Diff)
+pub(super) fn create_patch_vnext(before: &[u8], after: &[u8]) -> Result<Patch> {
+    let res = files_diff::diff(
+        before,
+        after,
+        DiffAlgorithm::Bidiff1,
+        CompressAlgorithm::Zstd,
+    );
+    let diff = res.map_err(Error::Diff)?;
+    Ok(Patch::from(diff))
 }
 
 #[derive(Clone, Debug, Encode, Decode)]
-struct Patch {
-    /// Algorithm used to generate this patch
-    pub diff_algorithm: DiffAlgo,
-    /// Compression method used for the patch data
-    pub compress_algorithm: CompressAlgo,
-    /// MD5 hash of the source file
+pub struct Patch {
+    /// MD5 hash of the old data
     pub before_hash: String,
-    /// MD5 hash of the target file
+    /// MD5 hash of the new data
     pub after_hash: String,
-    /// The actual patch data
+    /// The actual patch bytes
     pub patch: Vec<u8>,
 }
 
 impl Patch {
     fn from(diff: Diff) -> Self {
         Patch {
-            diff_algorithm: DiffAlgo::from(diff.diff_algorithm),
-            compress_algorithm: CompressAlgo::from(diff.compress_algorithm),
             before_hash: diff.before_hash,
             after_hash: diff.after_hash,
             patch: diff.patch,
@@ -61,55 +71,11 @@ impl Patch {
 
     fn into(self) -> Diff {
         Diff {
-            diff_algorithm: DiffAlgo::into(self.diff_algorithm),
-            compress_algorithm: CompressAlgo::into(self.compress_algorithm),
+            diff_algorithm: DiffAlgorithm::Bidiff1,
+            compress_algorithm: CompressAlgorithm::Zstd,
             before_hash: self.before_hash,
             after_hash: self.after_hash,
             patch: self.patch,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Encode, Decode, PartialEq, Eq, Hash)]
-enum DiffAlgo {
-    Rsync020,
-    Bidiff1,
-}
-
-impl DiffAlgo {
-    fn from(algo: DiffAlgorithm) -> Self {
-        match algo {
-            DiffAlgorithm::Bidiff1 => DiffAlgo::Bidiff1,
-            DiffAlgorithm::Rsync020 => DiffAlgo::Rsync020,
-        }
-    }
-
-    fn into(algo: DiffAlgo) -> DiffAlgorithm {
-        match algo {
-            DiffAlgo::Bidiff1 => DiffAlgorithm::Bidiff1,
-            DiffAlgo::Rsync020 => DiffAlgorithm::Rsync020,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Encode, Decode, PartialEq, Eq, Hash)]
-enum CompressAlgo {
-    None,
-    Zstd,
-}
-
-impl CompressAlgo {
-    fn from(algo: CompressAlgorithm) -> Self {
-        match algo {
-            CompressAlgorithm::None => CompressAlgo::None,
-            CompressAlgorithm::Zstd => CompressAlgo::Zstd,
-        }
-    }
-
-    fn into(algo: CompressAlgo) -> CompressAlgorithm {
-        match algo {
-            CompressAlgo::None => CompressAlgorithm::None,
-            CompressAlgo::Zstd => CompressAlgorithm::Zstd,
         }
     }
 }

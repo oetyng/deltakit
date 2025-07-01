@@ -38,3 +38,20 @@ impl Default for Config {
         }
     }
 }
+
+/// Diff operation description, in an operation
+/// sequence produced by `diff_async`.
+#[derive(Clone, Debug)]
+pub enum ApplyOp {
+    /// Re‑use an existing chunk
+    Data { bytes: Vec<u8>, offset: u64 },
+    /// Apply binary patch (`files_diff`) to base chunk
+    Patch {
+        /// The base data
+        base: Vec<u8>,
+        /// Patch between base and next version
+        patch: crate::encoding::Patch,
+        ///
+        offset: u64,
+    },
+}

@@ -14,14 +14,19 @@ mod error;
 mod types;
 
 use error::Result;
-pub use types::{ChunkOp, Config};
+pub use types::{ApplyOp, ChunkOp, Config};
+
+use crate::error::{ApplyError, ApplyResult};
 
 use async_stream::try_stream;
 use fastcdc::v2020::{AsyncStreamCDC, ChunkData};
 use futures::pin_mut;
 use sha2::{Digest, Sha256};
-use std::{collections::HashSet, pin::Pin};
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use std::{
+    collections::{BTreeMap, HashSet},
+    pin::Pin,
+};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncWrite, AsyncWriteExt};
 use tokio_stream::{Stream, StreamExt};
 
 /// Apply a sequence of `ChunkOp`s to produce the new file.
@@ -48,6 +53,87 @@ where
         }
     }
     sink.flush().await?;
+    Ok(())
+}
+
+// For in-memory diffs:
+pub async fn apply_iter<I, W, E>(sink: W, ops: I) -> ApplyResult<(), E>
+where
+    I: IntoIterator<Item = std::result::Result<ApplyOp, E>>,
+    W: AsyncWrite + AsyncSeek + Unpin,
+{
+    let stream = futures::stream::iter(ops.into_iter());
+    apply_stream(sink, stream).await
+}
+
+/// Consume a stream of `ApplyOp`s and apply them.
+///
+/// Does not require order of streamed chunks, however
+/// memory footprint descreases the more ordered it is.
+/// Incoming chunks will be buffered to a limit, to preserve
+/// HDD/SSD performance etc.
+///
+/// The caller needs to decide if they want/need to sync after apply.
+///
+/// Resume on error:
+/// 1. Catch ApplyError, seek sink to error.progress.
+/// 2. Continue feeding the same ops stream (skipping those with offset < progress) into apply_stream again.
+pub async fn apply_stream<W, Ops, E>(mut sink: W, mut ops: Ops) -> ApplyResult<(), E>
+where
+    W: AsyncWrite + AsyncSeek + Unpin,
+    Ops: Stream<Item = std::result::Result<ApplyOp, E>> + Unpin,
+{
+    let mut buffer = BTreeMap::<u64, Vec<u8>>::new();
+    let mut next_offset = 0u64;
+
+    while let Some(op_res) = ops.next().await {
+        let op = match op_res {
+            Ok(op) => op,
+            Err(e) => {
+                return Err(ApplyError::OpStream {
+                    source: e,
+                    progress: next_offset,
+                });
+            }
+        };
+
+        // 1) Turn ApplyOp into (offset, data)
+        let (offset, data) = match op {
+            ApplyOp::Data { bytes, offset } => (offset, bytes),
+            ApplyOp::Patch {
+                base,
+                patch,
+                offset,
+            } => {
+                let chunk = encoding::apply_patch_vnext(&base, patch).map_err(|e| {
+                    ApplyError::Encoding {
+                        source: e,
+                        progress: next_offset,
+                    }
+                })?;
+                (offset, chunk)
+            }
+        };
+
+        // 2) Buffer it
+        buffer.insert(offset, data);
+
+        // 3) Drain in-order as far as possible
+        while let Some(chunk) = buffer.remove(&next_offset) {
+            // no seek needed if strictly sequential
+            sink.write_all(&chunk).await.map_err(|e| ApplyError::Io {
+                source: e,
+                progress: next_offset,
+            })?;
+            next_offset += chunk.len() as u64;
+        }
+    }
+
+    sink.flush().await.map_err(|e| ApplyError::Io {
+        source: e,
+        progress: next_offset,
+    })?;
+
     Ok(())
 }
 
@@ -102,7 +188,7 @@ where
         }
 
         // -------- Large file path (FastCDC + Bidiff) --------
-        let old_set: HashSet<[u8;32]> = old_hashes.iter().copied().collect();
+        let lookup: HashSet<[u8;32]> = old_hashes.iter().copied().collect();
         let mut index = 0;
 
         let mut chunker = AsyncStreamCDC::new(&mut new, cfg.min_size, cfg.avg_size, cfg.max_size);
@@ -116,7 +202,7 @@ where
                 yield ChunkOp::Copy { hash: hash_new, length: data.len() as u32 };
             } else {
                 // changed chunk – decide patch vs insert
-                if index < old_hashes.len() && old_set.contains(&old_hashes[index]) {
+                if index < old_hashes.len() && lookup.contains(&old_hashes[index]) {
                     let base_hash = old_hashes[index];
                     let base_bytes = fetch_base(base_hash).await?;
                     let patch = encoding::create_patch(&base_bytes, &data)?;
