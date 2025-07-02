@@ -13,8 +13,21 @@ pub struct Config {
     pub patch_threshold: f32,
 }
 
-/// Diff operation description, in an operation
-/// sequence produced by `diff_async`.
+/// Progress of written data from apply ops,
+/// useful for consumer control, such as
+/// persistence and resuming on error.
+#[derive(Clone, Debug)]
+pub struct ChunkProgress {
+    ///
+    pub index: u64,
+    ///
+    pub offset: u64,
+    ///
+    pub len: usize,
+}
+
+/// Apply operation description, in an operation
+/// sequence passed to `apply`.
 #[derive(Clone, Debug)]
 pub enum ApplyOp {
     /// Re‑use an existing chunk
@@ -23,7 +36,7 @@ pub enum ApplyOp {
         offset: u64,
         bytes: Vec<u8>,
     },
-    /// Apply binary patch (`files_diff`) to base chunk
+    /// Apply binary patch to base chunk
     Patch {
         /// The resulting chunk's index
         index: u64,
@@ -37,7 +50,7 @@ pub enum ApplyOp {
 }
 
 /// Diff operation description, in an operation
-/// sequence produced by `diff_async`.
+/// sequence produced by `diff`.
 #[derive(Clone, Debug)]
 pub enum ChunkOp {
     /// Re-use an existing chunk identified by SHA-256

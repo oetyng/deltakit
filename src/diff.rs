@@ -8,7 +8,7 @@ use crate::{
 
 use async_stream::try_stream;
 use fastcdc::v2020::{AsyncStreamCDC, ChunkData};
-use futures::{Future, pin_mut, stream::FuturesUnordered};
+use futures::{Future, pin_mut};
 use sha2::{Digest, Sha256};
 use std::{
     collections::{HashMap, HashSet},
@@ -31,9 +31,9 @@ pub fn diff_stream<'a, New, Fetch, Fut, E>(
 ) -> Pin<Box<dyn Stream<Item = DeltaResult<ChunkOp, E>> + Send + 'a>>
 where
     New: AsyncRead + AsyncSeek + Unpin + Send + 'a,
-    Fetch: Fn([u8; 32]) -> Fut + Send + Sync + 'a,
+    Fetch: Fn([u8; 32]) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = Result<Vec<u8>, E>> + Send,
-    E: Send + 'a,
+    E: Send + 'static,
 {
     Box::pin(try_stream! {
         /* ---------------- small-file path ----------------- */
@@ -57,9 +57,9 @@ where
             return;
         }
 
-        /* ------------------ large-file path ------------------- */
-        // ---------- > max_size  →  FastCDC + window-LIS ----------
-        /* pass-1: hash only, record lens */
+        /* -------------------- large-file path ----------------------------- */
+        //   ----- new_size > max_size  →  FastCDC + window-LIS -----------
+        /* --------------- pass-1: hash only, record lens ------------------- */
         struct Rec { len: usize, hash: [u8;32] }
         let mut index: Vec<Rec> = Vec::new();
 
@@ -96,15 +96,16 @@ where
         let is_copy: HashSet<usize> =
             lis.into_iter().map(|idx| pairs[idx].0).collect();
 
+        /* ----------------- pass-1 ended ---------------------*/
+
         /* rewind reader for pass-2 */
         new.seek(SeekFrom::Start(0)).await?;
 
         /* channel + worker pool */
         let (tx, mut rx) = mpsc::unbounded_channel::<ChunkOp>();
-        let mut workers: FuturesUnordered<_> = FuturesUnordered::new();
         let fetch_arc = Arc::new(fetch_base);
 
-        /* pass-2 */
+        /* ------------------- pass-2 ------------------------*/
         let mut cdc = AsyncStreamCDC::new(
                 &mut new,
                 cfg.min_size,
@@ -114,54 +115,83 @@ where
         let cdc = cdc.as_stream();
         pin_mut!(cdc);
 
+        const MAX_WORKERS: usize = 32;
+        let mut in_flight = 0usize;         // current spawned tasks
+
+        /*  */
         for (idx, rec) in index.into_iter().enumerate() {
-            /* poll ready patch results */
-            while let Ok(op) = rx.try_recv() { yield op }
+            // could replace the channel with tokio_stream::wrappers::ReceiverStream
+            // and drive both streams with select! for clarity
 
-            // if let Some(res) = workers.next().now_or_never().flatten() { res? }
+            /* 1. if concurrency cap reached, wait for one result and yield it */
+            if in_flight >= MAX_WORKERS {
+                if let Some(op) = rx.recv().await {
+                    in_flight -= 1;     // worker finished
+                    yield op;
+                }
+            }
 
-            /* read payload of current chunk */
+            /* 2. drain finished workers */
+            while let Ok(op) = rx.try_recv() {
+                yield op;
+                in_flight -= 1;
+            }
+
+            /* 3. read the next cdc chunk */
             let cd = match cdc.next().await {
                 Some(Ok(c)) => c,
                 Some(Err(e)) => Err::<ChunkData, DeltaError<E>>(e.into())?,
                 None         => break,
             };
 
+            /* 4. return early if copy */
             if is_copy.contains(&idx) {
-                yield ChunkOp::Copy { index: idx, offset: cd.offset, length: rec.len, hash: rec.hash };
+                yield ChunkOp::Copy {
+                    index: idx,
+                    offset: cd.offset,
+                    length: rec.len,
+                    hash: rec.hash
+                };
                 continue;
             }
 
-            if idx < old_hashes.len() {
-                let old_hash        = old_hashes[idx];
+            /* 5. spawn worker for Patch / Insert */
+            let txc    = tx.clone();
+            let fetch  = fetch_arc.clone();
+            let old_hash        = old_hashes[idx];
+            let old_hashes_len = old_hashes.len();
+            tokio::spawn(async move {
                 let new_bytes = cd.data;
                 let offset    = cd.offset;
                 let threshold = cfg.patch_threshold;
-                let txc       = tx.clone();
-                let fetch     = fetch_arc.clone();
+                let txc       = txc.clone();
+                let fetch     = fetch.clone();
 
-                /* push future into local pool */
-                workers.push(async move {
-                    let base = fetch(old_hash).await.map_err(DeltaError::Fetch)?;
+                let op = if idx < old_hashes_len {
+                    let base  = fetch(old_hash).await.map_err(DeltaError::Fetch)?;
                     let patch = encoding::diff(&base, &new_bytes)?;
-                    let op = if patch.len() as f32 <= threshold * new_bytes.len() as f32 {
+                    if patch.len() as f32 <= threshold * new_bytes.len() as f32 {
                         let hash = sha256(&new_bytes);
-                        ChunkOp::Patch { index: idx, offset, length: cd.length, new_hash: hash, old_hash, patch }
+                        ChunkOp::Patch { index: idx, offset, length: cd.length,
+                                        new_hash: hash, old_hash, patch }
                     } else {
-                        ChunkOp::Insert { index: idx, offset, length: cd.length, hash: rec.hash, data: new_bytes }
-                    };
-                    txc.send(op).ok();
-                    Ok::<(), DeltaError<E>>(())
-                });
-            } else {
-                yield ChunkOp::Insert { index: idx, offset: cd.offset, length: cd.length, hash: rec.hash, data: cd.data };
-            }
+                        ChunkOp::Insert { index: idx, offset, length: cd.length,
+                                        hash: rec.hash, data: new_bytes }
+                    }
+                } else {
+                    ChunkOp::Insert { index: idx, offset: cd.offset, length: cd.length,
+                                    hash: rec.hash, data: new_bytes }
+                };
+                let _ = txc.send(op);
+                Ok::<(), DeltaError<E>>(())
+            });
+
+            in_flight += 1;     // new worker spawned
         }
 
-        /* drain channel & workers */
+        /* drain remaining results */
         drop(tx);
         while let Some(op) = rx.recv().await { yield op; }
-        while let Some(res) = workers.next().await { res?; }
     })
 }
 
