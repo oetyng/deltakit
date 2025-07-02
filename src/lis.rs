@@ -1,7 +1,7 @@
 //! .
 
-use crate::encoding;
 use crate::types::ChunkOp;
+use crate::{encoding, sha256};
 
 use crate::error::{DeltaError, DeltaResult};
 
@@ -53,25 +53,28 @@ where
         /* ---------------- small-file path ----------------- */
         // ---------- ≤ max_size  →  full-file bidiff ----------
         if new_size <= cfg.max_size as u64 {
-            let mut buf = Vec::with_capacity(new_size as usize);
-            new.read_to_end(&mut buf).await?;
+            let mut new_bytes = Vec::with_capacity(new_size as usize);
+            new.read_to_end(&mut new_bytes).await?;
             if let Some(&base_hash) = old_hashes.first() {
                 let base = fetch_base(base_hash).await.map_err(DeltaError::Fetch)?;
-                if base == buf { return } // identical
-                let patch = encoding::create_patch(&base, &buf)?;
-                if patch.len() as f32 <= cfg.patch_threshold * buf.len() as f32 {
-                    yield ChunkOp::Patch { base_hash, patch };
+                if base == new_bytes { return } // identical
+                let patch = encoding::create_patch(&base, &new_bytes)?;
+                if patch.len() as f32 <= cfg.patch_threshold * new_bytes.len() as f32 {
+                    let hash = sha256(&new_bytes);
+                    yield ChunkOp::Patch { index: 0, offset: 0, length: patch.len(), hash, base_hash, data: patch };
                     return;
                 }
             }
-            yield ChunkOp::Insert { data: buf };
+            // this is a new file or patch isn't not worthwhile
+            let hash = sha256(&new_bytes);
+            yield ChunkOp::Insert { index: 0, offset: 0, length: new_bytes.len(), hash, data: new_bytes };
             return;
         }
 
         /* ------------------ large-file path ------------------- */
         // ---------- > max_size  →  FastCDC + window-LIS ----------
         /* pass-1: hash only, record lens */
-        struct Rec { len: u32, hash: [u8;32] }
+        struct Rec { len: usize, hash: [u8;32] }
         let mut index: Vec<Rec> = Vec::new();
 
         {
@@ -84,8 +87,7 @@ where
             let cdc = cdc.as_stream();
             pin_mut!(cdc);
             while let Some(Ok(cd)) = cdc.next().await {
-                index.push( Rec { len: cd.length as u32,
-                                   hash: Sha256::digest(&cd.data).into() });
+                index.push(Rec { len: cd.length, hash: Sha256::digest(&cd.data).into() });
             }
         }
 
@@ -94,9 +96,9 @@ where
         let map: HashMap<_,_> =
             old_hashes.iter().copied().enumerate().map(|(i,h)|(h,i)).collect();
         let mut pairs = Vec::<(usize,usize)>::new();
-        for (ni, rec) in index.iter().enumerate() {
-            if let Some(&oi) = map.get(&rec.hash) {
-                if (oi as isize - ni as isize).abs() <= w { pairs.push((ni,oi)); }
+        for (new_idx, rec) in index.iter().enumerate() {
+            if let Some(&old_idx) = map.get(&rec.hash) {
+                if (old_idx as isize - new_idx as isize).abs() <= w { pairs.push((new_idx, old_idx)); }
             }
         }
         let lis = lis_indices(&pairs.iter().map(|&(_,o)| o).collect::<Vec<_>>());
@@ -135,13 +137,14 @@ where
             };
 
             if is_copy.contains(&idx) {
-                yield ChunkOp::Copy { hash: rec.hash, length: rec.len };
+                yield ChunkOp::Copy { index: idx, offset: cd.offset, length: rec.len, hash: rec.hash };
                 continue;
             }
 
             if idx < old_hashes.len() {
                 let bh        = old_hashes[idx];
-                let new_bytes = cd.data;      // move payload
+                let new_bytes = cd.data;
+                let offset    = cd.offset;
                 let threshold = cfg.patch_threshold;
                 let txc       = tx.clone();
                 let fetch     = fetch_arc.clone();
@@ -151,15 +154,16 @@ where
                     let base = fetch(bh).await.map_err(DeltaError::Fetch)?;
                     let patch = encoding::create_patch(&base, &new_bytes)?;
                     let op = if patch.len() as f32 <= threshold * new_bytes.len() as f32 {
-                        ChunkOp::Patch { base_hash: bh, patch }
+                        let hash = sha256(&patch);
+                        ChunkOp::Patch { index: idx, offset, length: patch.len(), hash, base_hash: bh, data: patch }
                     } else {
-                        ChunkOp::Insert { data: new_bytes }
+                        ChunkOp::Insert { index: idx, offset, length: cd.length, hash: rec.hash, data: new_bytes }
                     };
                     txc.send(op).ok();
                     Ok::<(), DeltaError<E>>(())
                 });
             } else {
-                yield ChunkOp::Insert { data: cd.data };
+                yield ChunkOp::Insert { index: idx, offset: cd.offset, length: cd.length, hash: rec.hash, data: cd.data };
             }
         }
 

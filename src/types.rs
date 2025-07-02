@@ -16,32 +16,6 @@ pub struct Config {
 /// Diff operation description, in an operation
 /// sequence produced by `diff_async`.
 #[derive(Clone, Debug)]
-pub enum ChunkOp {
-    /// Re‑use an existing chunk identified by SHA‑256
-    Copy { hash: [u8; 32], length: u32 },
-    /// Apply binary patch (`files_diff`) to base chunk (identified by hash)
-    Patch {
-        base_hash: [u8; 32],
-        patch: Vec<u8>, // serialized patch bytes (create_patch output)
-    },
-    /// Insert literal bytes (used when patch is not beneficial)
-    Insert { data: Vec<u8> },
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            min_size: 64 * 1024,
-            avg_size: 1 * 1024 * 1024,
-            max_size: 4 * 1024 * 1024,
-            patch_threshold: 0.8, // 20 % space gain required
-        }
-    }
-}
-
-/// Diff operation description, in an operation
-/// sequence produced by `diff_async`.
-#[derive(Clone, Debug)]
 pub enum ApplyOp {
     /// Re‑use an existing chunk
     Data { bytes: Vec<u8>, offset: u64 },
@@ -54,4 +28,60 @@ pub enum ApplyOp {
         ///
         offset: u64,
     },
+}
+
+/// Diff operation description, in an operation
+/// sequence produced by `diff_async`.
+#[derive(Clone, Debug)]
+pub enum ChunkOp {
+    /// Re-use an existing chunk identified by SHA-256
+    Copy {
+        /// Sequence index for the application order of this chunk
+        index: usize,
+        /// Byte offset in the new file
+        offset: u64,
+        /// Length in bytes of the chunk
+        length: usize,
+        /// SHA-256 hash of the reused chunk
+        hash: [u8; 32],
+    },
+    /// Apply binary patch to base chunk (identified by base_hash)
+    Patch {
+        /// Sequence index for the application order of this chunk
+        index: usize,
+        /// Byte offset in the new file
+        offset: u64,
+        /// Length in bytes of the chunk
+        length: usize,
+        /// SHA-256 hash of the resulting new chunk
+        hash: [u8; 32],
+        /// Serialized patch bytes (create_patch output)
+        data: Vec<u8>,
+        /// SHA-256 hash of the base chunk being patched
+        base_hash: [u8; 32],
+    },
+    /// Insert literal bytes (used when patch is not beneficial)
+    Insert {
+        /// Sequence index for the application order of this chunk
+        index: usize,
+        /// Byte offset in the new file
+        offset: u64,
+        /// Length in bytes of the chunk
+        length: usize,
+        /// SHA-256 hash of the inserted data
+        hash: [u8; 32],
+        /// Raw bytes of the new chunk
+        data: Vec<u8>,
+    },
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            min_size: 64 * 1024,
+            avg_size: 1 * 1024 * 1024,
+            max_size: 4 * 1024 * 1024,
+            patch_threshold: 0.8, // 20 % space gain required
+        }
+    }
 }

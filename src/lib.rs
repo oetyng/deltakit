@@ -45,12 +45,14 @@ where
                 let bytes = fetch(hash).await?;
                 sink.write_all(&bytes).await?;
             }
-            ChunkOp::Patch { base_hash, patch } => {
+            ChunkOp::Patch {
+                base_hash, data, ..
+            } => {
                 let base = fetch(base_hash).await?;
-                let new_chunk = encoding::apply_patch(&base, patch)?;
+                let new_chunk = encoding::apply_patch(&base, data)?;
                 sink.write_all(&new_chunk).await?;
             }
-            ChunkOp::Insert { data } => sink.write_all(data).await?,
+            ChunkOp::Insert { data, .. } => sink.write_all(data).await?,
         }
     }
     sink.flush().await?;
@@ -179,12 +181,14 @@ where
                 }
                 let patch = encoding::create_patch(&old_bytes, &new_bytes)?; // already zstd‑compressed + bincode
                 if (patch.len() as f32) <= cfg.patch_threshold * (new_bytes.len() as f32) {
-                    yield ChunkOp::Patch { base_hash, patch };
+                    let hash = sha256(&patch);
+                    yield ChunkOp::Patch { index: 0, offset: 0, length: patch.len(), hash, base_hash, data: patch };
                     return;
                 }
             }
             // new file or patch not worthwhile
-            yield ChunkOp::Insert { data: new_bytes };
+            let hash = sha256(&new_bytes);
+            yield ChunkOp::Insert { index: 0, offset: 0, length: new_bytes.len(), hash, data: new_bytes };
             return;
         }
 
@@ -196,11 +200,11 @@ where
         let stream = chunker.as_stream();
         pin_mut!(stream);
 
-        while let Some(Ok(ChunkData { data, .. })) = stream.next().await {
-            let hash_new = sha256(&data);
-            if index < old_hashes.len() && hash_new == old_hashes[index] {
+        while let Some(Ok(ChunkData { data, offset, length, .. })) = stream.next().await {
+            let hash = sha256(&data);
+            if index < old_hashes.len() && hash == old_hashes[index] {
                 // unchanged chunk
-                yield ChunkOp::Copy { hash: hash_new, length: data.len() as u32 };
+                yield ChunkOp::Copy { hash, length, index, offset };
             } else {
                 // changed chunk – decide patch vs insert
                 if index < old_hashes.len() && lookup.contains(&old_hashes[index]) {
@@ -208,13 +212,13 @@ where
                     let base_bytes = fetch_base(base_hash).await?;
                     let patch = encoding::create_patch(&base_bytes, &data)?;
                     if (patch.len() as f32) <= cfg.patch_threshold * (data.len() as f32) {
-                        yield ChunkOp::Patch { base_hash, patch };
+                        yield ChunkOp::Patch { index, offset, length, hash, data: patch, base_hash };
                     } else {
-                        yield ChunkOp::Insert { data };
+                        yield ChunkOp::Insert { index, offset, length, hash, data };
                     }
                 } else {
                     // new chunk appended beyond previous length
-                    yield ChunkOp::Insert { data };
+                    yield ChunkOp::Insert { index, offset, length, hash, data };
                 }
             }
             index += 1;
@@ -658,6 +662,8 @@ mod tests {
         let ops = vec![ChunkOp::Copy {
             hash: [1; 32],
             length: 10,
+            index: 0,
+            offset: 0,
         }];
         let mut out = Vec::new();
 
@@ -989,8 +995,7 @@ mod tests {
                 // drop any payload immediately
                 match op {
                     ChunkOp::Copy { .. } => {}
-                    ChunkOp::Patch { patch, .. } => drop(patch),
-                    ChunkOp::Insert { data } => drop(data),
+                    ChunkOp::Patch { data, .. } | ChunkOp::Insert { data, .. } => drop(data),
                 }
             }
             println!(
