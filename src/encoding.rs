@@ -15,18 +15,18 @@ pub enum Error {
     BinDecode(#[from] bincode::error::DecodeError),
 }
 
-pub(super) fn apply_patch(base: &[u8], delta: &[u8]) -> Result<Vec<u8>> {
+pub(super) fn apply_patch_old(base: &[u8], delta: &[u8]) -> Result<Vec<u8>> {
     let (patch, _): (Patch, _) = bincode::decode_from_slice(delta, config::standard())?;
     let res = files_diff::apply(base, &patch.into());
     res.map_err(Error::Diff)
 }
 
-pub(super) fn apply_patch_vnext(base: &[u8], delta: Patch) -> Result<Vec<u8>> {
+pub(super) fn apply_patch(base: &[u8], delta: Patch) -> Result<Vec<u8>> {
     let res = files_diff::apply(base, &delta.into());
     res.map_err(Error::Diff)
 }
 
-pub(super) fn create_patch(before: &[u8], after: &[u8]) -> Result<Vec<u8>> {
+pub(super) fn create_patch_old(before: &[u8], after: &[u8]) -> Result<Vec<u8>> {
     let res = files_diff::diff(
         before,
         after,
@@ -39,7 +39,7 @@ pub(super) fn create_patch(before: &[u8], after: &[u8]) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
-pub(super) fn create_patch_vnext(before: &[u8], after: &[u8]) -> Result<Patch> {
+pub(super) fn create_patch(before: &[u8], after: &[u8]) -> Result<Patch> {
     let res = files_diff::diff(
         before,
         after,

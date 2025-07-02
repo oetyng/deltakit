@@ -1,5 +1,7 @@
 //! .
 
+use crate::encoding::Patch;
+
 #[derive(Clone, Copy, Debug)]
 pub struct Config {
     /// Minimum FastCDC chunk size (bytes)
@@ -34,6 +36,51 @@ pub enum ApplyOp {
 /// sequence produced by `diff_async`.
 #[derive(Clone, Debug)]
 pub enum ChunkOp {
+    /// Re-use an existing chunk identified by SHA-256
+    Copy {
+        /// Sequence index for the application order of this chunk
+        index: usize,
+        /// Byte offset in the new file
+        offset: u64,
+        /// Length in bytes of the chunk
+        length: usize,
+        /// SHA-256 hash of the reused chunk
+        hash: [u8; 32],
+    },
+    /// Apply binary patch to base chunk (identified by base_hash)
+    Patch {
+        /// Sequence index for the application order of this chunk
+        index: usize,
+        /// Byte offset in the new file
+        offset: u64,
+        /// Length in bytes of the chunk
+        length: usize,
+        /// SHA-256 hash of the resulting new chunk
+        new_hash: [u8; 32],
+        /// The patch that on top of base gives the new chunk/file
+        patch: Patch,
+        /// SHA-256 hash of the base chunk being patched
+        old_hash: [u8; 32],
+    },
+    /// Insert literal bytes (used when patch is not beneficial)
+    Insert {
+        /// Sequence index for the application order of this chunk
+        index: usize,
+        /// Byte offset in the new file
+        offset: u64,
+        /// Length in bytes of the chunk
+        length: usize,
+        /// SHA-256 hash of the inserted data
+        hash: [u8; 32],
+        /// Raw bytes of the new chunk
+        data: Vec<u8>,
+    },
+}
+
+/// Diff operation description, in an operation
+/// sequence produced by `diff_async`.
+#[derive(Clone, Debug)]
+pub enum ChunkOpOld {
     /// Re-use an existing chunk identified by SHA-256
     Copy {
         /// Sequence index for the application order of this chunk

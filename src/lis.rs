@@ -55,13 +55,13 @@ where
         if new_size <= cfg.max_size as u64 {
             let mut new_bytes = Vec::with_capacity(new_size as usize);
             new.read_to_end(&mut new_bytes).await?;
-            if let Some(&base_hash) = old_hashes.first() {
-                let base = fetch_base(base_hash).await.map_err(DeltaError::Fetch)?;
+            if let Some(&old_hash) = old_hashes.first() {
+                let base = fetch_base(old_hash).await.map_err(DeltaError::Fetch)?;
                 if base == new_bytes { return } // identical
                 let patch = encoding::create_patch(&base, &new_bytes)?;
-                if patch.len() as f32 <= cfg.patch_threshold * new_bytes.len() as f32 {
-                    let hash = sha256(&new_bytes);
-                    yield ChunkOp::Patch { index: 0, offset: 0, length: patch.len(), hash, base_hash, data: patch };
+                if patch.patch.len() as f32 <= cfg.patch_threshold * new_bytes.len() as f32 {
+                    let new_hash = sha256(&new_bytes);
+                    yield ChunkOp::Patch { index: 0, offset: 0, length: new_bytes.len(), new_hash, old_hash, patch };
                     return;
                 }
             }
@@ -142,7 +142,7 @@ where
             }
 
             if idx < old_hashes.len() {
-                let bh        = old_hashes[idx];
+                let old_hash        = old_hashes[idx];
                 let new_bytes = cd.data;
                 let offset    = cd.offset;
                 let threshold = cfg.patch_threshold;
@@ -151,11 +151,11 @@ where
 
                 /* push future into local pool */
                 workers.push(async move {
-                    let base = fetch(bh).await.map_err(DeltaError::Fetch)?;
+                    let base = fetch(old_hash).await.map_err(DeltaError::Fetch)?;
                     let patch = encoding::create_patch(&base, &new_bytes)?;
-                    let op = if patch.len() as f32 <= threshold * new_bytes.len() as f32 {
-                        let hash = sha256(&patch);
-                        ChunkOp::Patch { index: idx, offset, length: patch.len(), hash, base_hash: bh, data: patch }
+                    let op = if patch.patch.len() as f32 <= threshold * new_bytes.len() as f32 {
+                        let hash = sha256(&new_bytes);
+                        ChunkOp::Patch { index: idx, offset, length: cd.length, new_hash: hash, old_hash, patch }
                     } else {
                         ChunkOp::Insert { index: idx, offset, length: cd.length, hash: rec.hash, data: new_bytes }
                     };
