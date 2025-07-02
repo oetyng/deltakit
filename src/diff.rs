@@ -207,3 +207,83 @@ fn lis_indices(seq: &[usize]) -> Vec<usize> {
     }
     lis
 }
+
+#[cfg(test)]
+mod lis_tests {
+    use super::lis_indices;
+
+    /// Convenience: convert index list to the actual subsequence
+    fn subseq(src: &[usize], idx: &[usize]) -> Vec<usize> {
+        idx.iter().map(|&i| src[i]).collect()
+    }
+
+    /// Assert the returned indices describe a *strictly increasing* subsequence.
+    fn assert_lis(src: &[usize], idx: &[usize]) {
+        let sub = subseq(src, idx);
+        assert!(
+            sub.windows(2).all(|w| w[0] < w[1]),
+            "subsequence is not strictly increasing: {:?}",
+            sub
+        );
+    }
+
+    #[test]
+    fn empty() {
+        let seq: Vec<usize> = vec![];
+        let lis = lis_indices(&seq);
+        assert!(lis.is_empty());
+    }
+
+    #[test]
+    fn already_increasing() {
+        let seq = (0..10).collect::<Vec<_>>();
+        let lis = lis_indices(&seq);
+        assert_eq!(lis, (0..10).collect::<Vec<_>>());
+        assert_lis(&seq, &lis);
+    }
+
+    #[test]
+    fn strictly_decreasing() {
+        let seq = (0..10).rev().collect::<Vec<_>>();
+        let lis = lis_indices(&seq);
+        assert_eq!(lis.len(), 1, "only one element can be increasing");
+        assert_lis(&seq, &lis);
+    }
+
+    #[test]
+    fn mixed_case() {
+        //              0  1  2  3  4  5  6  7
+        let seq = [5, 2, 8, 6, 3, 6, 9, 7];
+        // One valid LIS is indices [1, 3, 5, 7] → values [2, 6, 6, 7]
+        let lis = lis_indices(&seq);
+        assert_lis(&seq, &lis);
+        // result length must be maximal (4 here)
+        assert_eq!(lis.len(), 4);
+    }
+
+    #[test]
+    fn duplicates() {
+        let seq = [3, 1, 2, 2, 2, 3, 4];
+        let lis = lis_indices(&seq);
+        assert_lis(&seq, &lis);
+        // Longest increasing subsequence is [1,2,3,4] (len = 4)
+        assert_eq!(lis.len(), 4);
+        let values = subseq(&seq, &lis);
+        assert_eq!(values, vec![1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn random_long() {
+        // deterministic pseudo-random sequence
+        let mut seq = Vec::with_capacity(1_000);
+        let mut x = 1u32;
+        for _ in 0..1_000 {
+            x = x.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            seq.push((x % 10_000) as usize);
+        }
+        let lis = lis_indices(&seq);
+        assert_lis(&seq, &lis);
+        // sanity: LIS length should be ≥ log₂(N)
+        assert!(lis.len() >= 10, "unexpectedly short LIS: {}", lis.len());
+    }
+}
