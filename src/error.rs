@@ -2,8 +2,6 @@
 
 use crate::encoding;
 
-pub type Result<T> = std::result::Result<T, Error>;
-
 /// Crate error
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
@@ -11,8 +9,6 @@ pub enum Error {
     Io(#[from] std::io::Error),
     #[error("Encoding error: {0}")]
     Encoding(#[from] encoding::Error),
-    #[error("missing base chunk {0:?}")]
-    MissingBase([u8; 32]),
 }
 
 pub type ApplyResult<T, E> = std::result::Result<T, ApplyError<E>>;
