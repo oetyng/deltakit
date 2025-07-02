@@ -25,7 +25,7 @@ mod tests {
     use super::*;
     use fastcdc::v2020::AsyncStreamCDC;
     use sha2::{Digest, Sha256};
-    use std::{collections::HashMap, io, path::PathBuf, sync::Arc};
+    use std::{collections::HashMap, io, sync::Arc};
     use tempfile::NamedTempFile;
     use tokio::{fs::OpenOptions, sync::mpsc};
     use tokio_stream::StreamExt;
@@ -53,76 +53,28 @@ mod tests {
             }
         };
 
-        /* ---------- produce ChunkOp stream ---------- */
+        // /* ---------- build streams ---------- */
         let cfg = Config {
             max_size: 1024, // small-file path
             ..Config::default()
         };
-        let mut rdr = io::Cursor::new(new_bytes.clone());
-        let mut chunk_stream =
-            super::diff(&mut rdr, new_bytes.len() as u64, cfg, vec![old_hash], fetch);
-
-        let mut chunk_ops = Vec::new();
-        while let Some(op) = chunk_stream.next().await {
-            chunk_ops.push(op.unwrap());
-        }
-
-        /* ---------- translate to ApplyOp stream ---------- */
-        let mut apply_ops: Vec<Result<ApplyOp, io::Error>> = Vec::new();
-        for op in chunk_ops {
-            match op {
-                ChunkOp::Copy {
-                    index,
-                    offset,
-                    hash,
-                    ..
-                } => apply_ops.push(Ok(ApplyOp::Data {
-                    index: index as u64,
-                    offset,
-                    bytes: store.get(&hash).unwrap().clone(),
-                })),
-                ChunkOp::Patch {
-                    index,
-                    offset,
-                    old_hash,
-                    patch,
-                    ..
-                } => apply_ops.push(Ok(ApplyOp::Patch {
-                    index: index as u64,
-                    offset,
-                    base: store.get(&old_hash).unwrap().clone(),
-                    patch,
-                })),
-                ChunkOp::Insert {
-                    index,
-                    offset,
-                    data,
-                    ..
-                } => apply_ops.push(Ok(ApplyOp::Data {
-                    index: index as u64,
-                    offset,
-                    bytes: data,
-                })),
-            }
-        }
-        let apply_stream_src = tokio_stream::iter(apply_ops);
+        let new_len = new_bytes.len() as u64;
+        let cursor = io::Cursor::new(new_bytes.clone());
+        let diff_stream = super::diff(cursor, new_len, cfg, vec![old_hash], fetch);
+        let apply_stream = super::test_helper::chunk_to_apply(diff_stream, store.clone());
 
         /* ---------- sink (temp-file) ---------- */
-        let tmp = NamedTempFile::new()?;
-        let path: PathBuf = tmp.path().into();
+        let tmp = NamedTempFile::new().unwrap();
         let sink = OpenOptions::new()
-            .create(true)
             .read(true)
             .write(true)
-            .open(&path)
+            .open(tmp.path())
             .await?;
+        let (tx, _rx) = mpsc::unbounded_channel();
+        super::apply(sink, apply_stream, tx).await.unwrap();
 
-        /* ---------- apply ---------- */
-        let (prog_tx, _prog_rx) = mpsc::unbounded_channel();
-        super::apply(sink, apply_stream_src, prog_tx).await?;
-
-        /* ---------- verify ---------- */
-        let result = tokio::fs::read(&path).await?;
+        // --- verify ---
+        let result = std::fs::read(tmp.path()).unwrap();
         assert_eq!(result, new_bytes);
 
         Ok(())
@@ -131,7 +83,7 @@ mod tests {
     #[tokio::test]
     async fn round_trip_large_file() -> Result<(), Box<dyn std::error::Error>> {
         /* ---------- make 8 MiB base + tweak ---------- */
-        const SIZE: usize = 8 * 1024 * 1024;
+        const SIZE: usize = 80 * 1024 * 1024;
         let mut old_bytes = vec![0u8; SIZE];
         for (i, v) in old_bytes.iter_mut().enumerate() {
             *v = (i % 251) as u8;
@@ -169,81 +121,65 @@ mod tests {
             }
         };
 
-        /* ---------- build ApplyOp stream ---------- */
-        let apply_stream_src = {
-            /* ---------- diff ---------- */
-            let cursor = io::Cursor::new(new_bytes.clone());
-            let mut op_stream = super::diff(
-                cursor,
-                new_bytes.len() as u64,
-                cfg,
-                old_hashes.clone(),
-                fetch,
-            );
-
-            /* ---------- translate ---------- */
-            let mut apply_ops: Vec<Result<ApplyOp, io::Error>> = Vec::new();
-            while let Some(Ok(op)) = op_stream.next().await {
-                match op {
-                    ChunkOp::Copy {
-                        index,
-                        offset,
-                        hash,
-                        ..
-                    } => apply_ops.push(Ok(ApplyOp::Data {
-                        index: index as u64,
-                        offset,
-                        bytes: store.get(&hash).unwrap().clone(),
-                    })),
-                    ChunkOp::Patch {
-                        index,
-                        offset,
-                        old_hash,
-                        patch,
-                        ..
-                    } => apply_ops.push(Ok(ApplyOp::Patch {
-                        index: index as u64,
-                        offset,
-                        base: store.get(&old_hash).unwrap().clone(),
-                        patch,
-                    })),
-                    ChunkOp::Insert {
-                        index,
-                        offset,
-                        data,
-                        ..
-                    } => apply_ops.push(Ok(ApplyOp::Data {
-                        index: index as u64,
-                        offset,
-                        bytes: data,
-                    })),
-                }
-            }
-            tokio_stream::iter(apply_ops)
-        };
+        // /* ---------- build streams ---------- */
+        let new_len = new_bytes.len() as u64;
+        let cursor = io::Cursor::new(new_bytes.clone());
+        let diff_stream = super::diff(cursor, new_len, cfg, old_hashes, fetch);
+        let apply_stream = super::test_helper::chunk_to_apply(diff_stream, store.clone());
 
         /* ---------- sink (temp-file) ---------- */
-        let tmp = NamedTempFile::new()?;
+        let tmp = NamedTempFile::new().unwrap();
         let sink = OpenOptions::new()
-            .create(true)
             .read(true)
             .write(true)
             .open(tmp.path())
             .await?;
-
-        /* ---------- apply ---------- */
         let (tx, _rx) = mpsc::unbounded_channel();
-        super::apply(sink, apply_stream_src, tx).await?;
+        super::apply(sink, apply_stream, tx).await.unwrap();
 
-        /* ---------- verify ---------- */
-        let result = tokio::fs::read(tmp.path()).await?;
+        // --- verify ---
+        let result = std::fs::read(tmp.path()).unwrap();
         assert_eq!(result, new_bytes);
 
         Ok(())
     }
 }
 
-// cargo test --release round_trip_random_edits -- --nocapture
+#[cfg(test)]
+mod test_helper {
+    use super::*;
+    use crate::error::DeltaResult;
+
+    use async_stream::try_stream;
+    use futures::pin_mut;
+    use std::{collections::HashMap, pin::Pin, sync::Arc};
+    use tokio_stream::{Stream, StreamExt};
+
+    /// Convert `ChunkOp` as it arrives into `ApplyOp` and forward directly.
+    pub fn chunk_to_apply<'a, E: std::fmt::Debug + 'a>(
+        diff: Pin<Box<dyn Stream<Item = DeltaResult<ChunkOp, E>> + Send + 'a>>,
+        store: Arc<HashMap<[u8; 32], Vec<u8>>>,
+    ) -> impl Stream<Item = Result<ApplyOp, E>> + Unpin {
+        Box::pin(try_stream! {
+            pin_mut!(diff);
+            while let Some(op) = diff.next().await {
+                match op.unwrap() {
+                    ChunkOp::Copy { index, offset, hash, length, .. } => {
+                        let bytes = store[&hash][..length].to_vec();
+                        yield ApplyOp::Data { index: index as u64, offset, bytes };
+                    }
+                    ChunkOp::Patch { index, offset, old_hash, patch, .. } => {
+                        let base  = store[&old_hash].clone();
+                        yield ApplyOp::Patch { index: index as u64, offset, base, patch };
+                    }
+                    ChunkOp::Insert { index, offset, data, .. } => {
+                        yield ApplyOp::Data { index: index as u64, offset, bytes: data };
+                    }
+                }
+            }
+        })
+    }
+}
 
 #[cfg(test)]
 mod prop_tests {
@@ -253,7 +189,6 @@ mod prop_tests {
     use std::{collections::HashMap, sync::Arc};
     use tempfile::NamedTempFile;
     use tokio::{fs::OpenOptions, sync::mpsc};
-    use tokio_stream::StreamExt;
 
     fn sha256(d: &[u8]) -> [u8; 32] {
         Sha256::digest(d).into()
@@ -322,31 +257,13 @@ mod prop_tests {
                 move |h| { let store = store.clone(); async move { Ok::<Vec<u8>, ()>(store[&h].clone()) } }
             };
 
-            // --- diff ---
-            let mut diff_ops = Vec::new();
+            // /* ---------- build streams ---------- */
+            let new_len = new_bytes.len() as u64;
             let cursor = std::io::Cursor::new(new_bytes.clone());
-            let mut ds = super::diff(cursor, new_bytes.len() as u64, cfg, old_hashes.clone(), fetch);
-            tokio_test::block_on(async {
-                while let Some(op) = ds.next().await { diff_ops.push(op.unwrap()); }
-            });
+            let diff_stream = super::diff(cursor, new_len, cfg, old_hashes, fetch);
+            let apply_stream = super::test_helper::chunk_to_apply(diff_stream, store.clone());
 
-            // --- convert to ApplyOp stream ---
-            let apply_ops = diff_ops.into_iter().map(|op| {
-                Ok::<ApplyOp, ()>(match op {
-                    ChunkOp::Copy{index,offset,hash,length,..} => ApplyOp::Data{
-                        index:index as u64, offset, bytes:store[&hash][..length].to_vec()
-                    },
-                    ChunkOp::Patch{index,offset,old_hash,patch,..} => ApplyOp::Patch{
-                        index:index as u64, offset, base:store[&old_hash].clone(), patch
-                    },
-                    ChunkOp::Insert{index,offset,data,..} => ApplyOp::Data{
-                        index:index as u64, offset, bytes:data
-                    },
-                })
-            });
-            let apply_stream = tokio_stream::iter(apply_ops);
-
-            // --- sink temp file ---
+            /* ---------- sink temp-file ---------- */
             let tmp = NamedTempFile::new().unwrap();
             tokio_test::block_on(async {
                 let sink = OpenOptions::new().read(true).write(true).open(tmp.path()).await.unwrap();
