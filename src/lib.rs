@@ -9,6 +9,7 @@
 //!
 //! SPDX‑License‑Identifier: Apache‑2.0 OR MIT
 
+mod apply;
 mod encoding;
 mod error;
 mod lis;
@@ -16,8 +17,6 @@ mod types;
 
 use error::Result;
 pub use types::{ApplyOp, ChunkOp, Config};
-
-use crate::error::{ApplyError, ApplyResult};
 
 use async_stream::try_stream;
 use fastcdc::v2020::{AsyncStreamCDC, ChunkData};
@@ -29,114 +28,6 @@ use std::{
 };
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncWrite, AsyncWriteExt};
 use tokio_stream::{Stream, StreamExt};
-
-/// Apply a sequence of `ChunkOp`s to produce the new file.
-///
-/// * `fetch` must resolve chunk hashes from the previous version (or network).
-pub async fn apply<W, Fetch, Fut>(mut sink: W, ops: &[ChunkOp], mut fetch: Fetch) -> Result<()>
-where
-    W: AsyncWrite + Unpin,
-    Fetch: FnMut(&[u8; 32]) -> Fut,
-    Fut: std::future::Future<Output = Result<Vec<u8>>>,
-{
-    for op in ops {
-        match op {
-            ChunkOp::Copy { hash, .. } => {
-                let bytes = fetch(hash).await?;
-                sink.write_all(&bytes).await?;
-            }
-            ChunkOp::Patch {
-                old_hash, patch, ..
-            } => {
-                let base = fetch(old_hash).await?;
-                let new_chunk = encoding::apply(&base, patch)?;
-                sink.write_all(&new_chunk).await?;
-            }
-            ChunkOp::Insert { data, .. } => sink.write_all(data).await?,
-        }
-    }
-    sink.flush().await?;
-    Ok(())
-}
-
-// For in-memory diffs:
-pub async fn apply_iter<I, W, E>(sink: W, ops: I) -> ApplyResult<(), E>
-where
-    I: IntoIterator<Item = std::result::Result<ApplyOp, E>>,
-    W: AsyncWrite + AsyncSeek + Unpin,
-{
-    let stream = futures::stream::iter(ops.into_iter());
-    apply_stream(sink, stream).await
-}
-
-/// Consume a stream of `ApplyOp`s and apply them.
-///
-/// Does not require order of streamed chunks, however
-/// memory footprint descreases the more ordered it is.
-/// Incoming chunks will be buffered to a limit, to preserve
-/// HDD/SSD performance etc.
-///
-/// The caller needs to decide if they want/need to sync after apply.
-///
-/// Resume on error:
-/// 1. Catch ApplyError, seek sink to error.progress.
-/// 2. Continue feeding the same ops stream (skipping those with offset < progress) into apply_stream again.
-pub async fn apply_stream<W, Ops, E>(mut sink: W, mut ops: Ops) -> ApplyResult<(), E>
-where
-    W: AsyncWrite + AsyncSeek + Unpin,
-    Ops: Stream<Item = std::result::Result<ApplyOp, E>> + Unpin,
-{
-    let mut buffer = BTreeMap::<u64, Vec<u8>>::new();
-    let mut next_offset = 0u64;
-
-    while let Some(op_res) = ops.next().await {
-        let op = match op_res {
-            Ok(op) => op,
-            Err(e) => {
-                return Err(ApplyError::OpStream {
-                    source: e,
-                    progress: next_offset,
-                });
-            }
-        };
-
-        // 1) Turn ApplyOp into (offset, data)
-        let (offset, data) = match op {
-            ApplyOp::Data { bytes, offset } => (offset, bytes),
-            ApplyOp::Patch {
-                base,
-                patch,
-                offset,
-            } => {
-                let data = encoding::apply(&base, &patch).map_err(|e| ApplyError::Encoding {
-                    source: e,
-                    progress: next_offset,
-                })?;
-                (offset, data)
-            }
-        };
-
-        // 2) Buffer it
-        buffer.insert(offset, data);
-
-        // 3) Drain in-order as far as possible
-        while let Some(chunk) = buffer.remove(&next_offset) {
-            // no seek needed if strictly sequential
-            sink.write_all(&chunk).await.map_err(|e| ApplyError::Io {
-                source: e,
-                progress: next_offset,
-            })?;
-            next_offset += chunk.len() as u64;
-        }
-    }
-
-    sink.flush().await.map_err(|e| ApplyError::Io {
-        source: e,
-        progress: next_offset,
-    })?;
-
-    Ok(())
-}
 
 /// Returns a `Stream` of `ChunkOp` items representing the incremental delta between a prior version
 /// (identified by its ordered list of chunk hashes) and a new version read from `new`.
@@ -873,7 +764,7 @@ mod tests {
                 if self.remaining == 0 {
                     return Poll::Ready(Ok(()));
                 }
-                let to_emit = buf.remaining().min(self.remaining as usize);
+                let to_emit = buf.remaining().min(self.remaining as usize).unwrap();
                 // Initialize that many slots to zero
                 let unfilled = unsafe { buf.unfilled_mut() };
                 for slot in unfilled.iter_mut().take(to_emit) {
