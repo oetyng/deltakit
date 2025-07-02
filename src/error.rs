@@ -35,3 +35,19 @@ pub enum ApplyError<E> {
         progress: u64, // the next_offset at time of failure
     },
 }
+
+pub type DeltaResult<T, E> = std::result::Result<T, DeltaError<E>>;
+
+#[derive(thiserror::Error, Debug)]
+pub enum DeltaError<E> {
+    #[error("I/O error: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("Encoding error: {0}")]
+    Decoding(#[from] encoding::Error),
+    #[error("Fetch error: {0}")]
+    Fetch(E),
+    #[error("JoinError error: {0}")]
+    Join(#[from] tokio::task::JoinError),
+    #[error("FastCDC error: {0}")]
+    FastCDC(#[from] fastcdc::v2020::Error),
+}

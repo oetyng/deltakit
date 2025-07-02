@@ -11,6 +11,7 @@
 
 mod encoding;
 mod error;
+mod lis;
 mod types;
 
 use error::Result;
