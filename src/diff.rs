@@ -3,8 +3,7 @@
 use crate::{
     encoding,
     error::{DeltaError, DeltaResult},
-    sha256,
-    types::ChunkOp,
+    types::{ChunkOp, Config},
 };
 
 use async_stream::try_stream;
@@ -15,26 +14,13 @@ use std::{
     collections::{HashMap, HashSet},
     io::SeekFrom,
     pin::Pin,
+    sync::Arc,
 };
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt},
     sync::mpsc,
 };
 use tokio_stream::{Stream, StreamExt};
-
-#[derive(Clone, Copy, Debug)]
-pub struct Config {
-    /// Minimum FastCDC chunk size (bytes)
-    pub min_size: u32,
-    /// Average FastCDC chunk size (bytes)
-    pub avg_size: u32,
-    /// Maximum chunk size – also the cut-off for whole‑file diff path (bytes)
-    pub max_size: u32,
-    /// Patch must be ≤ threshold × literal to be used (range 0–1). Applies to both small files and chunks.
-    /// If the patch is not at least this fraction smaller than raw bytes, it falls back to `Insert`.
-    pub patch_threshold: f32,
-    pub fallback_window: isize,
-}
 
 pub fn diff_stream<'a, New, Fetch, Fut, E>(
     mut new: New,
@@ -92,7 +78,12 @@ where
         }
 
         /* window-LIS copy detection */
-        let w  = cfg.fallback_window as isize;
+
+        /* fallback_window  */
+        let num_chunks = old_hashes.len().max(index.len());
+        let mut w = (num_chunks as f32).sqrt().ceil() as isize;   // √N  ≈ 32 for 1 k chunks
+        w = w.clamp(4, 64);                // hard floor / ceiling
+
         let map: HashMap<_,_> =
             old_hashes.iter().copied().enumerate().map(|(i,h)|(h,i)).collect();
         let mut pairs = Vec::<(usize,usize)>::new();
@@ -111,7 +102,7 @@ where
         /* channel + worker pool */
         let (tx, mut rx) = mpsc::unbounded_channel::<ChunkOp>();
         let mut workers: FuturesUnordered<_> = FuturesUnordered::new();
-        let fetch_arc = std::sync::Arc::new(fetch_base);
+        let fetch_arc = Arc::new(fetch_base);
 
         /* pass-2 */
         let mut cdc = AsyncStreamCDC::new(
@@ -172,6 +163,12 @@ where
         while let Some(op) = rx.recv().await { yield op; }
         while let Some(res) = workers.next().await { res?; }
     })
+}
+
+fn sha256(data: &[u8]) -> [u8; 32] {
+    let mut h = Sha256::new();
+    h.update(data);
+    h.finalize().into()
 }
 
 /// O(k log k) LIS on the sequence of old indices
