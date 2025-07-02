@@ -1,17 +1,19 @@
 //! .
 
-use crate::types::ChunkOp;
-use crate::{encoding, sha256};
-
-use crate::error::{DeltaError, DeltaResult};
+use crate::{
+    encoding,
+    error::{DeltaError, DeltaResult},
+    sha256,
+    types::ChunkOp,
+};
 
 use async_stream::try_stream;
 use fastcdc::v2020::{AsyncStreamCDC, ChunkData};
-use futures::pin_mut;
+use futures::{Future, pin_mut, stream::FuturesUnordered};
 use sha2::{Digest, Sha256};
-use std::io::SeekFrom;
 use std::{
     collections::{HashMap, HashSet},
+    io::SeekFrom,
     pin::Pin,
 };
 use tokio::{
@@ -19,8 +21,6 @@ use tokio::{
     sync::mpsc,
 };
 use tokio_stream::{Stream, StreamExt};
-
-use futures::{Future, stream::FuturesUnordered};
 
 #[derive(Clone, Copy, Debug)]
 pub struct Config {
@@ -58,8 +58,8 @@ where
             if let Some(&old_hash) = old_hashes.first() {
                 let base = fetch_base(old_hash).await.map_err(DeltaError::Fetch)?;
                 if base == new_bytes { return } // identical
-                let patch = encoding::create_patch(&base, &new_bytes)?;
-                if patch.patch.len() as f32 <= cfg.patch_threshold * new_bytes.len() as f32 {
+                let patch = encoding::diff(&base, &new_bytes)?;
+                if patch.len() as f32 <= cfg.patch_threshold * new_bytes.len() as f32 {
                     let new_hash = sha256(&new_bytes);
                     yield ChunkOp::Patch { index: 0, offset: 0, length: new_bytes.len(), new_hash, old_hash, patch };
                     return;
@@ -152,8 +152,8 @@ where
                 /* push future into local pool */
                 workers.push(async move {
                     let base = fetch(old_hash).await.map_err(DeltaError::Fetch)?;
-                    let patch = encoding::create_patch(&base, &new_bytes)?;
-                    let op = if patch.patch.len() as f32 <= threshold * new_bytes.len() as f32 {
+                    let patch = encoding::diff(&base, &new_bytes)?;
+                    let op = if patch.len() as f32 <= threshold * new_bytes.len() as f32 {
                         let hash = sha256(&new_bytes);
                         ChunkOp::Patch { index: idx, offset, length: cd.length, new_hash: hash, old_hash, patch }
                     } else {

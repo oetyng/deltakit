@@ -15,7 +15,7 @@ mod lis;
 mod types;
 
 use error::Result;
-pub use types::{ApplyOp, ChunkOp, ChunkOpOld, Config};
+pub use types::{ApplyOp, ChunkOp, Config};
 
 use crate::error::{ApplyError, ApplyResult};
 
@@ -33,7 +33,7 @@ use tokio_stream::{Stream, StreamExt};
 /// Apply a sequence of `ChunkOp`s to produce the new file.
 ///
 /// * `fetch` must resolve chunk hashes from the previous version (or network).
-pub async fn apply<W, Fetch, Fut>(mut sink: W, ops: &[ChunkOpOld], mut fetch: Fetch) -> Result<()>
+pub async fn apply<W, Fetch, Fut>(mut sink: W, ops: &[ChunkOp], mut fetch: Fetch) -> Result<()>
 where
     W: AsyncWrite + Unpin,
     Fetch: FnMut(&[u8; 32]) -> Fut,
@@ -41,18 +41,18 @@ where
 {
     for op in ops {
         match op {
-            ChunkOpOld::Copy { hash, .. } => {
+            ChunkOp::Copy { hash, .. } => {
                 let bytes = fetch(hash).await?;
                 sink.write_all(&bytes).await?;
             }
-            ChunkOpOld::Patch {
-                base_hash, data, ..
+            ChunkOp::Patch {
+                old_hash, patch, ..
             } => {
-                let base = fetch(base_hash).await?;
-                let new_chunk = encoding::apply_patch_old(&base, data)?;
+                let base = fetch(old_hash).await?;
+                let new_chunk = encoding::apply(&base, patch)?;
                 sink.write_all(&new_chunk).await?;
             }
-            ChunkOpOld::Insert { data, .. } => sink.write_all(data).await?,
+            ChunkOp::Insert { data, .. } => sink.write_all(data).await?,
         }
     }
     sink.flush().await?;
@@ -108,11 +108,10 @@ where
                 patch,
                 offset,
             } => {
-                let data =
-                    encoding::apply_patch(&base, patch).map_err(|e| ApplyError::Encoding {
-                        source: e,
-                        progress: next_offset,
-                    })?;
+                let data = encoding::apply(&base, &patch).map_err(|e| ApplyError::Encoding {
+                    source: e,
+                    progress: next_offset,
+                })?;
                 (offset, data)
             }
         };
@@ -178,8 +177,8 @@ where
                     // identical file, zero ops
                     return;
                 }
-                let patch = encoding::create_patch(&old_bytes, &new_bytes)?; // already zstd‑compressed + bincode
-                if (patch.patch.len() as f32) <= cfg.patch_threshold * (new_bytes.len() as f32) {
+                let patch = encoding::diff(&old_bytes, &new_bytes)?; // already zstd‑compressed + bincode
+                if (patch.len() as f32) <= cfg.patch_threshold * (new_bytes.len() as f32) {
                     let new_hash = sha256(&new_bytes);
                     yield ChunkOp::Patch { index: 0, offset: 0, length: new_bytes.len(), new_hash, old_hash, patch };
                     return;
@@ -209,8 +208,8 @@ where
                 if index < old_hashes.len() && lookup.contains(&old_hashes[index]) {
                     let old_hash = old_hashes[index];
                     let base_bytes = fetch_base(old_hash).await?;
-                    let patch = encoding::create_patch(&base_bytes, &data)?;
-                    if (patch.patch.len() as f32) <= cfg.patch_threshold * (data.len() as f32) {
+                    let patch = encoding::diff(&base_bytes, &data)?;
+                    if (patch.len() as f32) <= cfg.patch_threshold * (data.len() as f32) {
                         yield ChunkOp::Patch { index, offset, length, new_hash: hash, patch, old_hash };
                     } else {
                         yield ChunkOp::Insert { index, offset, length, hash, data };

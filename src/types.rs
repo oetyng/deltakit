@@ -1,7 +1,5 @@
 //! .
 
-use crate::encoding::Patch;
-
 #[derive(Clone, Copy, Debug)]
 pub struct Config {
     /// Minimum FastCDC chunk size (bytes)
@@ -26,7 +24,7 @@ pub enum ApplyOp {
         /// The base data
         base: Vec<u8>,
         /// Patch between base and next version
-        patch: crate::encoding::Patch,
+        patch: Vec<u8>,
         ///
         offset: u64,
     },
@@ -58,54 +56,9 @@ pub enum ChunkOp {
         /// SHA-256 hash of the resulting new chunk
         new_hash: [u8; 32],
         /// The patch that on top of base gives the new chunk/file
-        patch: Patch,
+        patch: Vec<u8>,
         /// SHA-256 hash of the base chunk being patched
         old_hash: [u8; 32],
-    },
-    /// Insert literal bytes (used when patch is not beneficial)
-    Insert {
-        /// Sequence index for the application order of this chunk
-        index: usize,
-        /// Byte offset in the new file
-        offset: u64,
-        /// Length in bytes of the chunk
-        length: usize,
-        /// SHA-256 hash of the inserted data
-        hash: [u8; 32],
-        /// Raw bytes of the new chunk
-        data: Vec<u8>,
-    },
-}
-
-/// Diff operation description, in an operation
-/// sequence produced by `diff_async`.
-#[derive(Clone, Debug)]
-pub enum ChunkOpOld {
-    /// Re-use an existing chunk identified by SHA-256
-    Copy {
-        /// Sequence index for the application order of this chunk
-        index: usize,
-        /// Byte offset in the new file
-        offset: u64,
-        /// Length in bytes of the chunk
-        length: usize,
-        /// SHA-256 hash of the reused chunk
-        hash: [u8; 32],
-    },
-    /// Apply binary patch to base chunk (identified by base_hash)
-    Patch {
-        /// Sequence index for the application order of this chunk
-        index: usize,
-        /// Byte offset in the new file
-        offset: u64,
-        /// Length in bytes of the chunk
-        length: usize,
-        /// SHA-256 hash of the resulting new chunk
-        hash: [u8; 32],
-        /// Serialized patch bytes (create_patch output)
-        data: Vec<u8>,
-        /// SHA-256 hash of the base chunk being patched
-        base_hash: [u8; 32],
     },
     /// Insert literal bytes (used when patch is not beneficial)
     Insert {

@@ -7,14 +7,15 @@ description = "Hybrid FastCDC + binary diff library"
 
 [dependencies]
 async-stream = "0.3.6"
-bincode = "2.0.1"
+bidiff = "1.0.0"
+bipatch = "1.0.0"
 fastcdc = { version = "3.2.1", features = ["tokio"] }
-files-diff = "0.1.1"
 futures = "0.3"
 sha2 = "0.10"
 thiserror = "2.0.12"
-tokio = { version = "1", default-features = false, features = ["io-util"] }
+tokio = { version = "1.46.0", default-features = false, features = ["io-util"] }
 tokio-stream = "0.1.17"
+zstd = "0.13.2"
 
 [dev-dependencies]
 rand = "0.9.1"

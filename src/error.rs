@@ -42,12 +42,10 @@ pub type DeltaResult<T, E> = std::result::Result<T, DeltaError<E>>;
 pub enum DeltaError<E> {
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
-    #[error("Encoding error: {0}")]
+    #[error("Decoding error: {0}")]
     Decoding(#[from] encoding::Error),
-    #[error("Fetch error: {0}")]
-    Fetch(E),
-    #[error("JoinError error: {0}")]
-    Join(#[from] tokio::task::JoinError),
     #[error("FastCDC error: {0}")]
     FastCDC(#[from] fastcdc::v2020::Error),
+    #[error("Fetch error: {0}")]
+    Fetch(E),
 }
