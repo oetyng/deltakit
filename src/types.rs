@@ -18,15 +18,21 @@ pub struct Config {
 #[derive(Clone, Debug)]
 pub enum ApplyOp {
     /// Re‑use an existing chunk
-    Data { bytes: Vec<u8>, offset: u64 },
+    Data {
+        index: u64,
+        offset: u64,
+        bytes: Vec<u8>,
+    },
     /// Apply binary patch (`files_diff`) to base chunk
     Patch {
+        /// The resulting chunk's index
+        index: u64,
+        /// The resulting chunk's offset in the file
+        offset: u64,
         /// The base data
         base: Vec<u8>,
         /// Patch between base and next version
         patch: Vec<u8>,
-        ///
-        offset: u64,
     },
 }
 

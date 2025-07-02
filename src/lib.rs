@@ -22,11 +22,8 @@ use async_stream::try_stream;
 use fastcdc::v2020::{AsyncStreamCDC, ChunkData};
 use futures::pin_mut;
 use sha2::{Digest, Sha256};
-use std::{
-    collections::{BTreeMap, HashSet},
-    pin::Pin,
-};
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncWrite, AsyncWriteExt};
+use std::{collections::HashSet, pin::Pin};
+use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio_stream::{Stream, StreamExt};
 
 /// Returns a `Stream` of `ChunkOp` items representing the incremental delta between a prior version
@@ -764,7 +761,7 @@ mod tests {
                 if self.remaining == 0 {
                     return Poll::Ready(Ok(()));
                 }
-                let to_emit = buf.remaining().min(self.remaining as usize).unwrap();
+                let to_emit = buf.remaining().min(self.remaining as usize);
                 // Initialize that many slots to zero
                 let unfilled = unsafe { buf.unfilled_mut() };
                 for slot in unfilled.iter_mut().take(to_emit) {
