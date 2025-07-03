@@ -16,16 +16,14 @@ use tokio_stream::{Stream, StreamExt};
 
 /// Consume a stream of `ApplyOp`s and apply them.
 ///
-/// Does not require order of streamed chunks, however
-/// memory footprint descreases the more ordered it is.
-/// Incoming chunks will be buffered to a limit, to preserve
-/// HDD/SSD performance etc.
+/// Does not require order of streamed chunks.
+/// Will write to locations of the file as they come in.
 ///
 /// The caller needs to decide if they want/need to sync after apply.
 ///
 /// Resume on error:
-/// 1. Catch ApplyError, seek sink to error.progress.
-/// 2. Continue feeding the same ops stream (skipping those with offset < progress) into apply_stream again.
+/// Capture progress, on error, start feeding the same ops stream
+/// (skipping those already applied) into apply_stream again.
 pub async fn apply_stream<W, Ops, E>(
     mut sink: W,
     mut ops: Ops,

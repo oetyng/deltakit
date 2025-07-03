@@ -7,12 +7,13 @@ use std::io::{self, BufWriter, Cursor, Write};
 
 // Generally, that will be (num_cpus - 1), leaving one core free for bookkeeping
 // and other tasks, but as we do not know the number of cores on specific
-// machines, we use 3, assuming everyone in 2024 has at least 4 cores
+// machines, we use 3, assuming everyone in 2025 has at least 4 cores
 const SORT_PARTITIONS: usize = 3;
-// 512KiB. Choosing a chunk size that's too large will result in suboptimal core
+// 128KiB. Choosing a chunk size that's too large will result in suboptimal core
 // utilization, whereas choosing a chunk size that's too small will result in
-// increased memory usage for diminishing returns
-const SCAN_CHUNK_SIZE: usize = 1024 * 512;
+// increased memory usage for diminishing returns. 128KiB chosen over default 512KiB
+// due to ceiling of 4MiB used for diffing.
+const SCAN_CHUNK_SIZE: usize = 128 * 1024;
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {

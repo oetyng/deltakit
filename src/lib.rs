@@ -2,9 +2,9 @@
 //!
 //! High‑level rules:
 //! * Files ≤ `cfg.max_size` (default 4 MiB) ⇒ treat as a single chunk; produce **Patch** vs **Insert** by comparing
-//!   fully encoded `files_diff` output with a configurable `patch_threshold` (ratio of literal).
-//! * Files > `cfg.max_size` ⇒ stream with FastCDC.  For chunk _i_, consult `old_hashes[i]` – if identical, emit
-//!   **Copy**. Otherwise fetch that single base chunk via the async fetcher and decide Patch vs Insert.
+//!   fully encoded diff output with a configurable `patch_threshold` (ratio of literal).
+//! * Files > `cfg.max_size` ⇒ stream with FastCDC. For chunk _i_, consult `old_hashes[i]` – if identical, emit
+//!   **Copy**. Otherwise fetch that single base chunk via the async fetcher and decide **Patch** vs **Insert**.
 //! * No full scanning of the previous version is required; only bytes needed for mismatching chunks are fetched.
 //!
 //! SPDX‑License‑Identifier: Apache‑2.0 OR MIT
