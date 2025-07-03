@@ -1,0 +1,26 @@
+[package]
+name = "deltakit"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0 OR MIT"
+description = "Hybrid FastCDC + binary diff library"
+
+[dependencies]
+async-stream = "0.3.6"
+bidiff = "1.0.0"
+bipatch = "1.0.0"
+fastcdc = { version = "3.2.1", features = ["tokio"] }
+futures = "0.3"
+sha2 = "0.10"
+thiserror = "2.0.12"
+tokio = { version = "1.46.0", default-features = false, features = ["io-util", "rt" ] }
+tokio-stream = "0.1.17"
+zstd = "0.13.2"
+
+[dev-dependencies]
+proptest = "1"
+rand = "0.9.1"
+sysinfo = "0.35.2"
+tempfile = "3.20.0"
+tokio = { version = "1.46.0", features = ["macros", "rt-multi-thread", "io-util", "fs", "rt"] }
+tokio-test = { version = "0.4.4" }
