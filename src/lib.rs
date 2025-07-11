@@ -17,6 +17,7 @@ mod types;
 
 pub use apply::apply_stream as apply;
 pub use diff::diff_stream as diff;
+pub use encoding::{apply as apply_one, diff as diff_one};
 pub use error::{ApplyError, DeltaError};
 pub use types::{ApplyOp, ChunkOp, ChunkProgress, Config};
 
@@ -25,7 +26,11 @@ mod tests {
     use super::*;
     use fastcdc::v2020::AsyncStreamCDC;
     use sha2::{Digest, Sha256};
-    use std::{collections::HashMap, io, sync::Arc};
+    use std::{
+        collections::HashMap,
+        io::{self, Read, Seek, Write},
+        sync::Arc,
+    };
     use tempfile::NamedTempFile;
     use tokio::{fs::OpenOptions, sync::mpsc};
     use tokio_stream::StreamExt;
@@ -76,6 +81,103 @@ mod tests {
         // --- verify ---
         let result = std::fs::read(tmp.path()).unwrap();
         assert_eq!(result, new_bytes);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn chunks_map_to_file() -> Result<(), Box<dyn std::error::Error>> {
+        /* ---------- Setup file ---------- */
+        const SIZE: usize = 80 * 1024 * 1024;
+        let mut old_bytes = vec![0u8; SIZE];
+        for (i, v) in old_bytes.iter_mut().enumerate() {
+            *v = (i % 251) as u8;
+        }
+        let mut new_bytes = old_bytes.clone();
+        // flip a couple of bytes in two different chunks
+        new_bytes[1_100_000] ^= 0xAA;
+        new_bytes[5_200_000] ^= 0x55;
+
+        let mut tmp = NamedTempFile::new()?;
+        tmp.write(&new_bytes)?;
+
+        /* ---------- build base-store + hash list ---------- */
+        let cfg = Config::default();
+        let mut old_hashes = Vec::new();
+        let store = {
+            let mut store = HashMap::new();
+            let mut reader = io::Cursor::new(old_bytes.clone());
+            let mut cdc =
+                AsyncStreamCDC::new(&mut reader, cfg.min_size, cfg.avg_size, cfg.max_size);
+            let cdc = cdc.as_stream();
+            futures::pin_mut!(cdc);
+
+            while let Some(Ok(cd)) = cdc.next().await {
+                let hash = sha256(&cd.data);
+                store.insert(hash, cd.data.to_vec());
+                old_hashes.push(hash);
+            }
+            Arc::new(store)
+        };
+
+        /* ---------- fetch closure ---------- */
+        let fetch = {
+            let store = store.clone();
+            move |h| {
+                let store = store.clone();
+                async move { Ok::<Vec<u8>, ()>(store.get(&h).unwrap().clone()) }
+            }
+        };
+
+        /* ---------- Setup diff stream ---------- */
+        let cfg = Config::default();
+        let new_len = new_bytes.len() as u64;
+        let cursor = io::Cursor::new(new_bytes.clone());
+        let diff_stream = super::diff(cursor, new_len, cfg, old_hashes, fetch);
+        futures::pin_mut!(diff_stream);
+
+        fn validate(
+            offset: u64,
+            length: usize,
+            tmp: &mut NamedTempFile,
+            new_bytes: &[u8],
+            data: Option<Vec<u8>>,
+        ) {
+            let mut orig_bytes = vec![0u8; length];
+            tmp.seek(io::SeekFrom::Start(offset)).unwrap();
+            tmp.read_exact(&mut orig_bytes).unwrap();
+            let offset = offset as usize;
+            assert_eq!(orig_bytes, &new_bytes[offset..offset + length]);
+            data.map(|d| assert_eq!(orig_bytes, d));
+        }
+
+        let mut total_len = 0;
+
+        /* ---------- Loop through chunks ---------- */
+        while let Some(Ok(op)) = diff_stream.next().await {
+            match op {
+                ChunkOp::Copy { offset, length, .. } => {
+                    total_len += length;
+                    validate(offset, length, &mut tmp, &new_bytes, None);
+                }
+                ChunkOp::Insert {
+                    offset,
+                    length,
+                    data,
+                    ..
+                } => {
+                    total_len += length;
+                    validate(offset, length, &mut tmp, &new_bytes, Some(data));
+                }
+                ChunkOp::Patch { length, .. } => {
+                    total_len += length;
+                }
+            }
+        }
+
+        let file_size = tmp.as_file().metadata()?.len();
+        assert_eq!(total_len, new_len as usize);
+        assert_eq!(total_len, file_size as usize);
 
         Ok(())
     }
